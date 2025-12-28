@@ -73,6 +73,11 @@ class Spectrum(SpectrumContainer, ScreensaverSpectrum):
         self.init_spectrums()
         self.init_container()
         self.height_adjuster = 1.0
+        
+        # OPTIMIZATION: Dirty tracking for bar updates
+        self._prev_bar_heights = [0] * self.config[SIZE]
+        self._prev_topping_y = [0] * self.config[SIZE]
+        self._dirty_rects = []
 
         if "win" in sys.platform:
             self.windows = True
@@ -492,6 +497,11 @@ class Spectrum(SpectrumContainer, ScreensaverSpectrum):
         self.unit = self.height / self.config[MAX_VALUE]
         self.topping_height = self.spectrum_configs[self.index][TOPPING_HEIGHT]
         self.topping_step = self.spectrum_configs[self.index][TOPPING_STEP]
+        
+        # OPTIMIZATION: Reset dirty tracking on spectrum change
+        self._prev_bar_heights = [0] * self.config[SIZE]
+        self._prev_topping_y = [0] * self.config[SIZE]
+        self._dirty_rects = []
             
     def stop(self):
         """ Stop spectrum thread. """ 
@@ -617,11 +627,23 @@ class Spectrum(SpectrumContainer, ScreensaverSpectrum):
         :param index: element index
         :param new_height: element new height
         """
+        # OPTIMIZATION: Skip if height unchanged
+        prev_height = self._prev_bar_heights[index - 1]
+        if abs(new_height - prev_height) < 1:
+            return
+        self._prev_bar_heights[index - 1] = new_height
+        
         comp = self.components[index]
         comp.bounding_box.h = new_height
         comp.bounding_box.y = self.height - new_height
         comp.content_y = int(self.spectrum_y + self.origin_y - new_height)
         comp.visible = True
+        
+        # OPTIMIZATION: Mark dirty rect
+        if hasattr(comp, 'content_x'):
+            r = pygame.Rect(comp.content_x, comp.content_y, 
+                           comp.bounding_box.w, int(self.height))
+            self._dirty_rects.append(r)
 
     def set_reflection_y(self, index, new_height):
         """ Set reflection Y coordinate
@@ -631,6 +653,9 @@ class Spectrum(SpectrumContainer, ScreensaverSpectrum):
         """
         if self.reflection == [None]:
             return
+        
+        # OPTIMIZATION: Skip if bar height was unchanged (already checked in set_bar_y)
+        # Reflection tracks bar, so only update if bar was marked dirty
 
         comp = self.components[index + self.config[SIZE]]
         comp.bounding_box.h = new_height
@@ -676,8 +701,30 @@ class Spectrum(SpectrumContainer, ScreensaverSpectrum):
         """ Update UI Thread method. """ 
 
         while self.run_flag:
-            self.clean_draw_update()
+            self.dirty_draw_update()
             time.sleep(self.config[UPDATE_UI_INTERVAL])
+    
+    def dirty_draw_update(self):
+        """ OPTIMIZATION: Only redraw dirty areas instead of full clean_draw_update """
+        
+        if not self._dirty_rects:
+            # Nothing changed - still need to draw but can skip clean
+            self.draw()
+            pygame.display.update()
+            return
+        
+        # Clean only dirty areas
+        for rect in self._dirty_rects:
+            self.draw_area(rect)
+        
+        # Draw all components (they clip to their bounding boxes)
+        self.draw()
+        
+        # Update only dirty rectangles
+        pygame.display.update(self._dirty_rects)
+        
+        # Clear dirty list for next frame
+        self._dirty_rects = []
 
     def start_display_output(self):
         """ Start main loop in standalone mode """
